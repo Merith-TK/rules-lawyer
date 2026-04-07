@@ -9,14 +9,22 @@ import (
 	"rules-laywer/store"
 )
 
+// AdminConfig mirrors the top-level AdminConfig so the bot package stays
+// independent of the main package.
+type AdminConfig struct {
+	RoleNames []string
+	RoleIDs   []string
+	UserIDs   []string
+}
+
 // Bot holds all runtime state for the Discord bot.
 type Bot struct {
-	session       *discordgo.Session
-	store         *store.Store
-	anthropicKey  string
-	adminRoleName string
-	pdfDir        string
-	guildID       string
+	session      *discordgo.Session
+	store        *store.Store
+	anthropicKey string
+	admin        AdminConfig
+	pdfDir       string
+	guildID      string
 
 	registeredCmds []*discordgo.ApplicationCommand
 }
@@ -87,25 +95,28 @@ var slashCommands = []*discordgo.ApplicationCommand{
 }
 
 // New creates a new Bot instance and connects the Discord session.
-func New(token, anthropicKey, adminRoleName, pdfDir, guildID string, s *store.Store) (*Bot, error) {
+func New(token, anthropicKey string, admin AdminConfig, pdfDir, guildID string, s *store.Store) (*Bot, error) {
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
 		return nil, fmt.Errorf("create discord session: %w", err)
 	}
 
 	b := &Bot{
-		session:       dg,
-		store:         s,
-		anthropicKey:  anthropicKey,
-		adminRoleName: adminRoleName,
-		pdfDir:        pdfDir,
-		guildID:       guildID,
+		session:      dg,
+		store:        s,
+		anthropicKey: anthropicKey,
+		admin:        admin,
+		pdfDir:       pdfDir,
+		guildID:      guildID,
 	}
 
 	dg.AddHandler(b.onReady)
 	dg.AddHandler(b.onInteraction)
 	dg.AddHandler(b.onMessage)
 
+	// MESSAGE_CONTENT is a privileged intent that must also be enabled in the
+	// Discord Developer Portal (Bot → Privileged Gateway Intents).
+	// Without it, slash commands still work; prefix (!) commands will not.
 	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentMessageContent
 
 	return b, nil
@@ -127,7 +138,8 @@ func (b *Bot) Close() {
 }
 
 func (b *Bot) onReady(s *discordgo.Session, r *discordgo.Ready) {
-	log.Printf("Logged in as %s#%s", r.User.Username, r.User.Discriminator)
+	log.Printf("Logged in as %s#%s (ID: %s)", r.User.Username, r.User.Discriminator, r.User.ID)
+	log.Printf("Invite URL: %s", inviteURL(r.User.ID))
 	b.registerSlashCommands(s)
 }
 
@@ -141,4 +153,14 @@ func (b *Bot) registerSlashCommands(s *discordgo.Session) {
 		b.registeredCmds = append(b.registeredCmds, registered)
 		log.Printf("registered slash command: /%s", cmd.Name)
 	}
+}
+
+// inviteURL builds the OAuth2 URL to add the bot to a server.
+// Permissions: Send Messages (2048) + Read Message History (65536) + Embed Links (16384)
+func inviteURL(clientID string) string {
+	const permissions = 2048 + 65536 + 16384 // 83968
+	return fmt.Sprintf(
+		"https://discord.com/api/oauth2/authorize?client_id=%s&permissions=%d&scope=bot+applications.commands",
+		clientID, permissions,
+	)
 }

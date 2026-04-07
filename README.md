@@ -29,13 +29,22 @@ mkdir -p rules-laywer-data
 cp .env.example rules-laywer-data/.env
 ```
 
-Edit `rules-laywer-data/.env`:
+Edit `rules-laywer-data/.env` (secrets only):
 
 ```env
 DISCORD_TOKEN=your_discord_bot_token
-DISCORD_GUILD_ID=your_server_id          # optional but recommended for dev
+DISCORD_GUILD_ID=your_server_id    # optional but recommended for dev
 ANTHROPIC_API_KEY=your_anthropic_key
-ADMIN_ROLE_NAME=DM                       # Discord role allowed to manage books
+```
+
+Admin configuration lives in `rules-laywer-data/config.yaml` (auto-created on first run):
+
+```yaml
+admin:
+  role_names:        # matched case-insensitively
+    - DM
+  role_ids: []       # Discord role snowflake IDs — right-click role → Copy Role ID
+  user_ids: []       # specific Discord user IDs — right-click user → Copy User ID
 ```
 
 > `DB_PATH` and `PDF_DIR` default to `<data-dir>/rules.db` and `<data-dir>/pdfs/`. Override them in `.env` if needed.

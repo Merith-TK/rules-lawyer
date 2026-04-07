@@ -43,7 +43,11 @@ func main() {
 	b, err := bot.New(
 		cfg.DiscordToken,
 		cfg.AnthropicKey,
-		cfg.AdminRoleName,
+		bot.AdminConfig{
+			RoleNames: cfg.Admin.RoleNames,
+			RoleIDs:   cfg.Admin.RoleIDs,
+			UserIDs:   cfg.Admin.UserIDs,
+		},
 		cfg.PDFDir,
 		cfg.DiscordGuildID,
 		s,

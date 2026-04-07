@@ -44,7 +44,7 @@ func (b *Bot) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate
 
 	case "upload":
 		if !b.isAdmin(s, i.GuildID, i.Member) {
-			response = "You need the **" + b.adminRoleName + "** role to upload books."
+			response = "You don't have permission to upload books. See `config.yaml` to configure admin access."
 			break
 		}
 		edition := optString(data.Options, "edition")
@@ -71,14 +71,14 @@ func (b *Bot) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate
 
 	case "scan":
 		if !b.isAdmin(s, i.GuildID, i.Member) {
-			response = "You need the **" + b.adminRoleName + "** role to scan for books."
+			response = "You don't have permission to scan for books. See `config.yaml` to configure admin access."
 			break
 		}
 		response = b.cmdScan()
 
 	case "remove":
 		if !b.isAdmin(s, i.GuildID, i.Member) {
-			response = "You need the **" + b.adminRoleName + "** role to remove books."
+			response = "You don't have permission to remove books. See `config.yaml` to configure admin access."
 			break
 		}
 		response = b.cmdRemove(optString(data.Options, "book"))
@@ -105,11 +105,14 @@ func (b *Bot) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate
 }
 
 // onMessage handles prefix-based commands (e.g. !ask, !books).
+// Requires the MESSAGE_CONTENT privileged intent to be enabled in the
+// Discord Developer Portal; if not enabled, m.Content will be empty and
+// this handler is a no-op.
 func (b *Bot) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author.ID == s.State.User.ID {
 		return
 	}
-	if !strings.HasPrefix(m.Content, prefix) {
+	if m.Content == "" || !strings.HasPrefix(m.Content, prefix) {
 		return
 	}
 
@@ -134,7 +137,7 @@ func (b *Bot) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	case "upload":
 		if !b.isAdminByMessage(s, m) {
-			response = "You need the **" + b.adminRoleName + "** role to upload books."
+			response = "You don't have permission to upload books. See `config.yaml` to configure admin access."
 			break
 		}
 		// Parse args: [edition:<tag>] [name:<name>] [url:<url>] or attachment
@@ -159,14 +162,14 @@ func (b *Bot) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	case "scan":
 		if !b.isAdminByMessage(s, m) {
-			response = "You need the **" + b.adminRoleName + "** role to scan for books."
+			response = "You don't have permission to scan for books. See `config.yaml` to configure admin access."
 			break
 		}
 		response = b.cmdScan()
 
 	case "remove":
 		if !b.isAdminByMessage(s, m) {
-			response = "You need the **" + b.adminRoleName + "** role to remove books."
+			response = "You don't have permission to remove books. See `config.yaml` to configure admin access."
 			break
 		}
 		response = b.cmdRemove(args)
@@ -186,18 +189,34 @@ func (b *Bot) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 }
 
-// isAdmin checks if the interaction member has the configured admin role.
+// isAdmin checks if the member has admin access via user ID, role ID, or role name.
 func (b *Bot) isAdmin(s *discordgo.Session, guildID string, member *discordgo.Member) bool {
-	if member == nil {
+	if member == nil || member.User == nil {
 		return false
 	}
+
+	// Check explicit user IDs first
+	for _, uid := range b.admin.UserIDs {
+		if uid == member.User.ID {
+			return true
+		}
+	}
+
+	// Check member's roles against configured role IDs and role names
 	for _, roleID := range member.Roles {
+		for _, adminRoleID := range b.admin.RoleIDs {
+			if roleID == adminRoleID {
+				return true
+			}
+		}
 		role, err := s.State.Role(guildID, roleID)
 		if err != nil {
 			continue
 		}
-		if strings.EqualFold(role.Name, b.adminRoleName) {
-			return true
+		for _, name := range b.admin.RoleNames {
+			if strings.EqualFold(role.Name, name) {
+				return true
+			}
 		}
 	}
 	return false
