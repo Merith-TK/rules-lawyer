@@ -1,0 +1,9 @@
+# Default data directory (DB, PDFs, .env)
+rules-laywer-data/
+
+# Build output
+rules-lawyer
+rules-laywer
+
+# Environment files at root (legacy location)
+.env

@@ -22,20 +22,23 @@ No full PDFs are ever sent to the API — only the relevant excerpts.
 
 ### 1. Configure
 
+All runtime data (database, PDFs, config) lives in a single data directory. The default is `./rules-laywer-data/`. Use `--data-dir` to point it elsewhere.
+
 ```bash
-cp .env.example .env
+mkdir -p rules-laywer-data
+cp .env.example rules-laywer-data/.env
 ```
 
-Edit `.env`:
+Edit `rules-laywer-data/.env`:
 
 ```env
 DISCORD_TOKEN=your_discord_bot_token
 DISCORD_GUILD_ID=your_server_id          # optional but recommended for dev
 ANTHROPIC_API_KEY=your_anthropic_key
 ADMIN_ROLE_NAME=DM                       # Discord role allowed to manage books
-DB_PATH=./rules.db
-PDF_DIR=./pdfs
 ```
+
+> `DB_PATH` and `PDF_DIR` default to `<data-dir>/rules.db` and `<data-dir>/pdfs/`. Override them in `.env` if needed.
 
 > **`DISCORD_GUILD_ID`** — If set, slash commands register instantly on that server. If empty, they register globally (up to 1 hour propagation delay).
 
@@ -44,7 +47,8 @@ PDF_DIR=./pdfs
 ```bash
 go mod tidy
 go build -o rules-lawyer .
-./rules-lawyer
+./rules-lawyer                              # uses ./rules-laywer-data/
+./rules-lawyer --data-dir /etc/rules-bot   # custom data directory
 ```
 
 ### 3. Invite the bot
@@ -60,13 +64,13 @@ Required permissions: `Send Messages`, `Read Message History`.
 
 ## Adding rulebooks
 
-### Option A — Drop PDFs in the `./pdfs/` directory
+### Option A — Drop PDFs in the data directory
 
-The bot scans this directory on startup and indexes any PDFs not already in the database.
+The bot scans `<data-dir>/pdfs/` on startup and indexes any PDFs not already in the database.
 
 ```bash
-mkdir -p pdfs
-cp "Players_Handbook_2024.pdf" pdfs/
+mkdir -p rules-laywer-data/pdfs
+cp "Players_Handbook_2024.pdf" rules-laywer-data/pdfs/
 ./rules-lawyer   # indexes it automatically on start
 ```
 
@@ -155,4 +159,5 @@ rules-laywer/
 - **Scanned PDFs** (image-only, no embedded text) are not supported. The PDF must contain selectable text.
 - Long answers are truncated to Discord's 2000-character message limit.
 - The bot uses **Claude Haiku** by default for cost efficiency. You can change the model in `claude/client.go`.
-- The SQLite database (`rules.db`) is a single file — back it up to preserve your indexed books.
+- The SQLite database is a single file at `<data-dir>/rules.db` — back it up to preserve your indexed books.
+- The entire `rules-laywer-data/` directory is gitignored by default to keep credentials and data out of version control.
