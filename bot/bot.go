@@ -57,9 +57,9 @@ var slashCommands = []*discordgo.ApplicationCommand{
 		Description: "Index a PDF rulebook (admin only — attach PDF or provide URL)",
 		Options: []*discordgo.ApplicationCommandOption{
 			{
-				Type:        discordgo.ApplicationCommandOptionString,
-				Name:        "edition",
-				Description: "Override edition detection (e.g. 5e2014, 5e2024)",
+				Type:        discordgo.ApplicationCommandOptionAttachment,
+				Name:        "file",
+				Description: "PDF file to upload",
 				Required:    false,
 			},
 			{
@@ -72,6 +72,12 @@ var slashCommands = []*discordgo.ApplicationCommand{
 				Type:        discordgo.ApplicationCommandOptionString,
 				Name:        "name",
 				Description: "Override the book name",
+				Required:    false,
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "edition",
+				Description: "Override edition detection (e.g. 5e2014, 5e2024)",
 				Required:    false,
 			},
 		},
@@ -140,6 +146,7 @@ func (b *Bot) Close() {
 func (b *Bot) onReady(s *discordgo.Session, r *discordgo.Ready) {
 	log.Printf("Logged in as %s#%s (ID: %s)", r.User.Username, r.User.Discriminator, r.User.ID)
 	log.Printf("Invite URL: %s", inviteURL(r.User.ID))
+	log.Printf("Admin config — userIDs=%v roleIDs=%v roleNames=%v", b.admin.UserIDs, b.admin.RoleIDs, b.admin.RoleNames)
 	b.registerSlashCommands(s)
 }
 

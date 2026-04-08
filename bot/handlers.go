@@ -60,18 +60,22 @@ func (b *Bot) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate
 		name := optString(data.Options, "name")
 
 		pdfPath := ""
-		if i.Message != nil && len(i.Message.Attachments) > 0 {
-			att := i.Message.Attachments[0]
-			if strings.EqualFold(filepath.Ext(att.Filename), ".pdf") {
-				var dlErr error
-				pdfPath, dlErr = downloadAttachment(att.URL, att.Filename)
-				if dlErr != nil {
-					response = fmt.Sprintf("Failed to download attachment: %v", dlErr)
+		if attID := optRawString(data.Options, "file"); attID != "" && data.Resolved != nil {
+			if att, ok := data.Resolved.Attachments[attID]; ok {
+				if strings.EqualFold(filepath.Ext(att.Filename), ".pdf") {
+					var dlErr error
+					pdfPath, dlErr = downloadAttachment(att.URL, att.Filename)
+					if dlErr != nil {
+						response = fmt.Sprintf("Failed to download attachment: %v", dlErr)
+						break
+					}
+					defer os.Remove(pdfPath)
+					if name == "" {
+						name = strings.TrimSuffix(att.Filename, filepath.Ext(att.Filename))
+					}
+				} else {
+					response = "Attached file must be a PDF."
 					break
-				}
-				defer os.Remove(pdfPath)
-				if name == "" {
-					name = strings.TrimSuffix(att.Filename, filepath.Ext(att.Filename))
 				}
 			}
 		}
@@ -268,12 +272,21 @@ func truncate(s string) string {
 
 // isAdmin checks if the member has admin access via user ID, role ID, or role name.
 func (b *Bot) isAdmin(s *discordgo.Session, guildID string, member *discordgo.Member) bool {
-	if member == nil || member.User == nil {
+	if member == nil {
+		log.Printf("isAdmin: denied — member is nil")
+		return false
+	}
+	if member.User == nil {
+		log.Printf("isAdmin: denied — member.User is nil")
 		return false
 	}
 
+	log.Printf("isAdmin: checking user %s | configured userIDs=%v roleIDs=%v roleNames=%v",
+		member.User.ID, b.admin.UserIDs, b.admin.RoleIDs, b.admin.RoleNames)
+
 	for _, uid := range b.admin.UserIDs {
 		if uid == member.User.ID {
+			log.Printf("isAdmin: granted — user ID match (%s)", uid)
 			return true
 		}
 	}
@@ -281,19 +294,23 @@ func (b *Bot) isAdmin(s *discordgo.Session, guildID string, member *discordgo.Me
 	for _, roleID := range member.Roles {
 		for _, adminRoleID := range b.admin.RoleIDs {
 			if roleID == adminRoleID {
+				log.Printf("isAdmin: granted — role ID match (%s)", roleID)
 				return true
 			}
 		}
 		role, err := s.State.Role(guildID, roleID)
 		if err != nil {
+			log.Printf("isAdmin: state.Role(%s, %s) error: %v", guildID, roleID, err)
 			continue
 		}
 		for _, name := range b.admin.RoleNames {
 			if strings.EqualFold(role.Name, name) {
+				log.Printf("isAdmin: granted — role name match (%s == %s)", role.Name, name)
 				return true
 			}
 		}
 	}
+	log.Printf("isAdmin: denied — no match found for user %s", member.User.ID)
 	return false
 }
 
@@ -301,6 +318,11 @@ func (b *Bot) isAdmin(s *discordgo.Session, guildID string, member *discordgo.Me
 func (b *Bot) isAdminByMessage(s *discordgo.Session, m *discordgo.MessageCreate) bool {
 	if m.Member == nil {
 		return false
+	}
+	// Discord does not always populate Member.User in MessageCreate events;
+	// m.Author is always set and is the same user.
+	if m.Member.User == nil {
+		m.Member.User = m.Author
 	}
 	return b.isAdmin(s, m.GuildID, m.Member)
 }
@@ -310,6 +332,20 @@ func optString(opts []*discordgo.ApplicationCommandInteractionDataOption, name s
 	for _, o := range opts {
 		if o.Name == name {
 			return o.StringValue()
+		}
+	}
+	return ""
+}
+
+// optRawString extracts a raw string value for option types whose Value is a
+// string but that aren't ApplicationCommandOptionString (e.g. Attachment, User,
+// Role, Channel — all send their snowflake ID as the raw value).
+func optRawString(opts []*discordgo.ApplicationCommandInteractionDataOption, name string) string {
+	for _, o := range opts {
+		if o.Name == name {
+			if s, ok := o.Value.(string); ok {
+				return s
+			}
 		}
 	}
 	return ""
