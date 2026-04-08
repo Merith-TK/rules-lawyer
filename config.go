@@ -19,6 +19,11 @@ type AdminConfig struct {
 }
 
 type yamlConfig struct {
+	// Token fields — optional. Environment variables take priority.
+	DiscordToken   string `yaml:"discord_token"`
+	DiscordGuildID string `yaml:"discord_guild_id"`
+	AnthropicKey   string `yaml:"anthropic_api_key"`
+
 	Admin AdminConfig `yaml:"admin"`
 }
 
@@ -32,8 +37,13 @@ type Config struct {
 }
 
 // LoadConfig loads configuration from the data directory.
-//   - Secrets  → <dataDir>/.env
+//   - Secrets  → <dataDir>/.env  (or environment variables)
 //   - Settings → <dataDir>/config.yaml
+//
+// Token precedence (highest to lowest):
+//  1. Environment variable (DISCORD_TOKEN, DISCORD_GUILD_ID, ANTHROPIC_API_KEY)
+//  2. <dataDir>/.env file
+//  3. config.yaml (discord_token, discord_guild_id, anthropic_api_key fields)
 //
 // DB and PDF paths default to subdirectories of dataDir.
 func LoadConfig(dataDir string) Config {
@@ -45,22 +55,23 @@ func LoadConfig(dataDir string) Config {
 	_ = godotenv.Load(filepath.Join(dataDir, ".env"))
 
 	// Load settings from config.yaml
-	adminCfg := loadYAMLConfig(filepath.Join(dataDir, "config.yaml"))
+	yc := loadYAMLConfig(filepath.Join(dataDir, "config.yaml"))
 
+	// Env vars take priority over config.yaml values
 	cfg := Config{
-		DiscordToken:   os.Getenv("DISCORD_TOKEN"),
-		DiscordGuildID: os.Getenv("DISCORD_GUILD_ID"),
-		AnthropicKey:   os.Getenv("ANTHROPIC_API_KEY"),
-		Admin:          adminCfg,
+		DiscordToken:   firstNonEmpty(os.Getenv("DISCORD_TOKEN"), yc.DiscordToken),
+		DiscordGuildID: firstNonEmpty(os.Getenv("DISCORD_GUILD_ID"), yc.DiscordGuildID),
+		AnthropicKey:   firstNonEmpty(os.Getenv("ANTHROPIC_API_KEY"), yc.AnthropicKey),
+		Admin:          yc.Admin,
 		DBPath:         getEnvDefault("DB_PATH", filepath.Join(dataDir, "rules.db")),
 		PDFDir:         getEnvDefault("PDF_DIR", filepath.Join(dataDir, "pdfs")),
 	}
 
 	if cfg.DiscordToken == "" {
-		log.Fatal("DISCORD_TOKEN is required (set in <data-dir>/.env)")
+		log.Fatal("DISCORD_TOKEN is required (set DISCORD_TOKEN env var, add to <data-dir>/.env, or set discord_token in config.yaml)")
 	}
 	if cfg.AnthropicKey == "" {
-		log.Fatal("ANTHROPIC_API_KEY is required (set in <data-dir>/.env)")
+		log.Fatal("ANTHROPIC_API_KEY is required (set ANTHROPIC_API_KEY env var, add to <data-dir>/.env, or set anthropic_api_key in config.yaml)")
 	}
 
 	return cfg
@@ -68,11 +79,11 @@ func LoadConfig(dataDir string) Config {
 
 // loadYAMLConfig reads config.yaml. If the file doesn't exist it writes a
 // default one and returns the default config so the bot still starts.
-func loadYAMLConfig(path string) AdminConfig {
+func loadYAMLConfig(path string) yamlConfig {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		writeDefaultYAML(path)
-		return defaultAdminConfig()
+		return yamlConfig{Admin: defaultAdminConfig()}
 	}
 	if err != nil {
 		log.Fatalf("read %s: %v", path, err)
@@ -85,9 +96,9 @@ func loadYAMLConfig(path string) AdminConfig {
 
 	// If the file exists but admin section is empty, use defaults
 	if len(yc.Admin.RoleNames) == 0 && len(yc.Admin.RoleIDs) == 0 && len(yc.Admin.UserIDs) == 0 {
-		return defaultAdminConfig()
+		yc.Admin = defaultAdminConfig()
 	}
-	return yc.Admin
+	return yc
 }
 
 func defaultAdminConfig() AdminConfig {
@@ -98,7 +109,14 @@ func defaultAdminConfig() AdminConfig {
 
 func writeDefaultYAML(path string) {
 	const defaultContent = `# Rules Lawyer — bot configuration
-# Edit this file to control who can manage rulebooks.
+# Edit this file to configure the bot.
+
+# Bot tokens — can also be set via environment variables or the .env file.
+# Environment variables and .env values take priority over what is set here.
+#
+# discord_token: ""         # overrides DISCORD_TOKEN env var
+# discord_guild_id: ""      # overrides DISCORD_GUILD_ID env var (empty = global slash commands)
+# anthropic_api_key: ""     # overrides ANTHROPIC_API_KEY env var
 
 admin:
   # Role names (case-insensitive). Users with any of these roles can
@@ -126,4 +144,14 @@ func getEnvDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// firstNonEmpty returns the first non-empty string from vals.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

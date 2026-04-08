@@ -1,3 +1,42 @@
+// Package indexer handles importing PDF rulebooks into the rules-lawyer
+// search index.
+//
+// # Indexing Pipeline
+//
+// Each book passes through the following stages when indexed:
+//
+//  1. Acquisition — IndexFromURL downloads the PDF to a temp file;
+//     IndexFromFile uses a local path directly. ScanDir walks a directory
+//     and calls IndexFromFile on every unindexed PDF it finds.
+//
+//  2. Text Extraction — ExtractPages tries two strategies in order:
+//     a. pdftotext (poppler-utils) — fast, lossless for PDFs with embedded
+//        text. Pages are separated by form-feed characters (\f) in the
+//        pdftotext output, so each \f-delimited segment becomes one PageText.
+//     b. OCR fallback — if pdftotext yields no meaningful text (fewer than
+//        5 words per page), pdftoppm renders every page to a 200 DPI PNG
+//        image and tesseract performs OCR on each image individually.
+//        Pages that fail OCR are skipped rather than aborting the whole book.
+//
+//  3. Edition Detection — DetectEdition scans the combined text of the first
+//     three pages for known edition markers (e.g. "pathfinder second edition",
+//     "5th edition") and returns a normalised tag such as "5e2014" or
+//     "pathfinder2e". Returns "unknown" when no marker is recognised.
+//
+//  4. Chunking — ChunkPages splits each page's text into segments of roughly
+//     400 words. The splitter prefers to break at sentence-ending punctuation
+//     (. ? !) so that each chunk stays semantically coherent. Every chunk
+//     records the source page number so citations can be generated later.
+//
+//  5. Storage — The book record and all chunks are written to the SQLite FTS5
+//     database via store.AddBook / store.AddChunks. The FTS5 index enables
+//     full-text search with optional edition filtering.
+//
+// # Prerequisites
+//
+// pdftotext (poppler-utils) must be installed for PDFs with embedded text.
+// pdftoppm (poppler-utils) and tesseract-ocr must also be installed to
+// index scanned (image-only) PDFs via OCR.
 package indexer
 
 import (
@@ -7,9 +46,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"rules-laywer/store"
 )
+
+// httpClient is used for all outbound HTTP requests with a conservative
+// timeout. PDF downloads can be large, so 5 minutes is intentionally generous.
+var httpClient = &http.Client{Timeout: 5 * time.Minute}
 
 // IndexFromURL downloads a PDF from the given URL and indexes it.
 // progress may be nil.
@@ -26,7 +70,7 @@ func IndexFromURL(url, bookName, forceEdition string, s *store.Store, progress P
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 
-	resp, err := http.Get(url) //nolint:noctx
+	resp, err := httpClient.Get(url)
 	if err != nil {
 		return "", fmt.Errorf("download pdf: %w", err)
 	}

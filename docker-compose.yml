@@ -1,0 +1,7 @@
+services:
+  rules-lawyer:
+    build: .
+    working_dir: /app
+    volumes:
+      - ./:/app
+    restart: unless-stopped

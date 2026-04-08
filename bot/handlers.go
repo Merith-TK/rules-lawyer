@@ -18,6 +18,10 @@ import (
 
 const prefix = "!"
 
+// discordHTTPClient is used for downloading Discord attachments. 60 seconds
+// is sufficient since Discord enforces its own file size caps.
+var discordHTTPClient = &http.Client{Timeout: 60 * time.Second}
+
 // onInteraction handles slash command interactions.
 func (b *Bot) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if i.Type != discordgo.InteractionApplicationCommand {
@@ -342,7 +346,7 @@ func parseUploadArgs(args string) (edition, name, url string) {
 
 // downloadAttachment downloads a Discord attachment to a temp file and returns its path.
 func downloadAttachment(url, filename string) (string, error) {
-	resp, err := http.Get(url) //nolint:noctx
+	resp, err := discordHTTPClient.Get(url)
 	if err != nil {
 		return "", err
 	}
