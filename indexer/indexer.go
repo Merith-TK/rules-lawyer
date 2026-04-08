@@ -123,6 +123,7 @@ func IndexFromFile(path, bookName, forceEdition string, s *store.Store, progress
 	if edition == "" {
 		progress("Detecting edition...")
 		edition = DetectEdition(pages)
+		progress(fmt.Sprintf("Detected edition: %s", edition))
 	}
 
 	// Register book
@@ -132,20 +133,18 @@ func IndexFromFile(path, bookName, forceEdition string, s *store.Store, progress
 	}
 
 	// Chunk and store
-	progress(fmt.Sprintf("Storing %d pages into index...", len(pages)))
 	rawChunks := ChunkPages(pages, 400)
+	progress(fmt.Sprintf("Storing %d chunks from %d pages...", len(rawChunks), len(pages)))
 	storeChunks := make([]store.Chunk, len(rawChunks))
 	for i, c := range rawChunks {
 		storeChunks[i] = store.Chunk{
-			BookName: bookName,
-			Edition:  edition,
-			Page:     c.Page,
-			Section:  c.Section,
-			Content:  c.Content,
+			Page:    c.Page,
+			Section: c.Section,
+			Content: c.Content,
 		}
 	}
 
-	if err := s.AddChunks(bookID, bookName, edition, storeChunks); err != nil {
+	if err := s.AddChunks(bookID, storeChunks); err != nil {
 		s.RemoveBook(bookName) //nolint:errcheck
 		return "", fmt.Errorf("add chunks: %w", err)
 	}
@@ -188,9 +187,12 @@ func ScanDir(dir string, s *store.Store, progress ProgressFunc) (added []string,
 			continue
 		}
 
-		progress(fmt.Sprintf("[%d/%d] Indexing: %s", n+1, len(pdfs), bookName))
+		prefix := fmt.Sprintf("[%d/%d] **%s**: ", n+1, len(pdfs), bookName)
+		progress(prefix + "starting...")
 		path := filepath.Join(dir, e.Name())
-		edition, err := IndexFromFile(path, bookName, "", s, progress)
+		edition, err := IndexFromFile(path, bookName, "", s, func(msg string) {
+			progress(prefix + msg)
+		})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", e.Name(), err))
 			continue

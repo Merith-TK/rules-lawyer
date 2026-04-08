@@ -8,7 +8,7 @@ import (
 	"rules-laywer/indexer"
 )
 
-const searchLimit = 5
+const searchLimit = 10
 
 // cmdAsk handles the /ask command and !ask prefix.
 func (b *Bot) cmdAsk(question, edition string) string {
@@ -119,4 +119,18 @@ func (b *Bot) cmdRemove(bookName string) string {
 		return fmt.Sprintf("No book named **%s** found.", bookName)
 	}
 	return fmt.Sprintf("Removed **%s** from the index.", bookName)
+}
+
+// cmdReindex wipes all indexed data and re-scans the PDF directory.
+// This is slash-command-only and requires multiple confirmations.
+func (b *Bot) cmdReindex(progress indexer.ProgressFunc) string {
+	progress("Removing all indexed books...")
+	n, err := b.store.RemoveAllBooks()
+	if err != nil {
+		return fmt.Sprintf("Failed to wipe index: %v", err)
+	}
+
+	progress(fmt.Sprintf("Removed %d book(s). Re-scanning PDF directory...", n))
+	result := b.cmdScan(progress)
+	return fmt.Sprintf("**Reindex complete** (wiped %d old book(s))\n\n%s", n, result)
 }

@@ -99,6 +99,22 @@ func (b *Bot) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate
 		}
 		response = b.cmdRemove(optString(data.Options, "book"))
 
+	case "reindex":
+		if !b.isAdmin(s, i.GuildID, i.Member) {
+			response = "You don't have permission to reindex. See `config.yaml` to configure admin access."
+			break
+		}
+		ack1 := optBool(data.Options, "confirm-delete-all")
+		ack2 := optBool(data.Options, "confirm-long-operation")
+		confirm := optString(data.Options, "confirm")
+		if !ack1 || !ack2 || confirm != "REINDEX" {
+			response = "Reindex aborted. You must set both acknowledgements to **True** and type `REINDEX` (all caps) to confirm."
+			break
+		}
+		response = b.runWithLiveProgress(s, i, func(progress indexer.ProgressFunc) string {
+			return b.cmdReindex(progress)
+		})
+
 	default:
 		response = "Unknown command."
 	}
@@ -260,12 +276,19 @@ func editInteraction(s *discordgo.Session, i *discordgo.InteractionCreate, conte
 	}
 }
 
-// truncate caps a string at Discord's 2000-character message limit.
+// truncate caps a string at Discord's 2000-character message limit,
+// cutting at a valid UTF-8 rune boundary.
 func truncate(s string) string {
-	if len(s) > 1990 {
-		return s[:1987] + "..."
+	const maxLen = 1990
+	if len(s) <= maxLen {
+		return s
 	}
-	return s
+	// Walk backwards from maxLen to find a valid rune boundary
+	truncated := []rune(s)
+	for len(string(truncated)) > maxLen-3 {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return string(truncated) + "..."
 }
 
 // isAdmin checks if the member has admin access via user ID, role ID, or role name.
@@ -333,6 +356,16 @@ func optString(opts []*discordgo.ApplicationCommandInteractionDataOption, name s
 		}
 	}
 	return ""
+}
+
+// optBool safely extracts a boolean option value by name.
+func optBool(opts []*discordgo.ApplicationCommandInteractionDataOption, name string) bool {
+	for _, o := range opts {
+		if o.Name == name {
+			return o.BoolValue()
+		}
+	}
+	return false
 }
 
 // optRawString extracts a raw string value for option types whose Value is a

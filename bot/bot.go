@@ -25,8 +25,6 @@ type Bot struct {
 	admin        AdminConfig
 	pdfDir       string
 	guildID      string
-
-	registeredCmds []*discordgo.ApplicationCommand
 }
 
 var slashCommands = []*discordgo.ApplicationCommand{
@@ -98,6 +96,30 @@ var slashCommands = []*discordgo.ApplicationCommand{
 			},
 		},
 	},
+	{
+		Name:        "reindex",
+		Description: "Wipe ALL indexed data and re-scan the PDF directory (admin only, destructive!)",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionBoolean,
+				Name:        "confirm-delete-all",
+				Description: "Set to True to confirm you understand ALL indexed data will be wiped",
+				Required:    true,
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionBoolean,
+				Name:        "confirm-long-operation",
+				Description: "Set to True to confirm you understand re-indexing may take a very long time",
+				Required:    true,
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "confirm",
+				Description: "Type REINDEX in all caps to confirm",
+				Required:    true,
+			},
+		},
+	},
 }
 
 // New creates a new Bot instance and connects the Discord session.
@@ -133,13 +155,9 @@ func (b *Bot) Open() error {
 	return b.session.Open()
 }
 
-// Close gracefully removes slash commands and closes the session.
+// Close closes the Discord session. Commands are left registered so
+// Discord clients keep their cached state across bot restarts.
 func (b *Bot) Close() {
-	for _, cmd := range b.registeredCmds {
-		if err := b.session.ApplicationCommandDelete(b.session.State.User.ID, b.guildID, cmd.ID); err != nil {
-			log.Printf("warn: failed to delete command %s: %v", cmd.Name, err)
-		}
-	}
 	b.session.Close()
 }
 
@@ -151,13 +169,12 @@ func (b *Bot) onReady(s *discordgo.Session, r *discordgo.Ready) {
 }
 
 func (b *Bot) registerSlashCommands(s *discordgo.Session) {
-	for _, cmd := range slashCommands {
-		registered, err := s.ApplicationCommandCreate(s.State.User.ID, b.guildID, cmd)
-		if err != nil {
-			log.Printf("error: register slash command %s: %v", cmd.Name, err)
-			continue
-		}
-		b.registeredCmds = append(b.registeredCmds, registered)
+	created, err := s.ApplicationCommandBulkOverwrite(s.State.User.ID, b.guildID, slashCommands)
+	if err != nil {
+		log.Printf("error: bulk overwrite slash commands: %v", err)
+		return
+	}
+	for _, cmd := range created {
 		log.Printf("registered slash command: /%s", cmd.Name)
 	}
 }

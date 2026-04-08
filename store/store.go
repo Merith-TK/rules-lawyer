@@ -11,7 +11,7 @@ import (
 
 // currentSchemaVersion is bumped whenever a breaking schema change is made.
 // The migrate() function runs all pending migrations in order.
-const currentSchemaVersion = 2
+const currentSchemaVersion = 4
 
 type Book struct {
 	ID       int64
@@ -37,6 +37,20 @@ func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
+	}
+
+	// Enable WAL mode for concurrent read/write access, set a busy timeout
+	// so concurrent writers retry instead of failing immediately, and turn on
+	// foreign key enforcement.
+	for _, pragma := range []string{
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA busy_timeout = 5000",
+		"PRAGMA foreign_keys = ON",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("%s: %w", pragma, err)
+		}
 	}
 
 	if err := migrate(db); err != nil {
@@ -162,6 +176,105 @@ func migrate(db *sql.DB) error {
 		if _, err := db.Exec(`UPDATE schema_version SET version = 3`); err != nil {
 			return err
 		}
+		version = 3
+	}
+
+	// v4: normalise chunks — remove denormalised book_name/edition columns,
+	// add foreign key with ON DELETE CASCADE, add index on book_id, and
+	// rebuild FTS5 to only index content + section.
+	// Existing chunk data is dropped; books must be re-indexed.
+	if version < 4 {
+		log.Println("store: migrating to schema v4 — normalised chunks + FK cascade (re-index all books)")
+
+		// Drop old tables/triggers
+		for _, stmt := range []string{
+			`DROP TRIGGER IF EXISTS chunks_ai`,
+			`DROP TRIGGER IF EXISTS chunks_ad`,
+			`DROP TABLE IF EXISTS chunks_fts`,
+			`DROP TABLE IF EXISTS chunks`,
+		} {
+			if _, err := db.Exec(stmt); err != nil {
+				return err
+			}
+		}
+
+		// Recreate chunks with FK and no denormalised columns
+		if _, err := db.Exec(`
+			CREATE TABLE chunks (
+				id      INTEGER PRIMARY KEY AUTOINCREMENT,
+				book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+				page    INTEGER NOT NULL,
+				section TEXT    NOT NULL DEFAULT '',
+				content TEXT    NOT NULL
+			)
+		`); err != nil {
+			return err
+		}
+
+		if _, err := db.Exec(`CREATE INDEX idx_chunks_book_id ON chunks(book_id)`); err != nil {
+			return err
+		}
+
+		// FTS5 external-content table backed by chunks
+		if _, err := db.Exec(`
+			CREATE VIRTUAL TABLE chunks_fts USING fts5(
+				content,
+				section,
+				content     = 'chunks',
+				content_rowid = 'id',
+				tokenize    = 'unicode61 remove_diacritics 1'
+			)
+		`); err != nil {
+			return err
+		}
+
+		// Sync triggers
+		if _, err := db.Exec(`
+			CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+				INSERT INTO chunks_fts(rowid, content, section)
+				VALUES (new.id, new.content, new.section);
+			END
+		`); err != nil {
+			return err
+		}
+		if _, err := db.Exec(`
+			CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+				INSERT INTO chunks_fts(chunks_fts, rowid, content, section)
+				VALUES ('delete', old.id, old.content, old.section);
+			END
+		`); err != nil {
+			return err
+		}
+
+		// Also update books table: allow same name with different editions
+		// by replacing the UNIQUE(name) constraint with UNIQUE(name, edition).
+		// SQLite can't ALTER constraints, so rebuild the table.
+		if _, err := db.Exec(`
+			CREATE TABLE books_new (
+				id        INTEGER PRIMARY KEY AUTOINCREMENT,
+				name      TEXT NOT NULL,
+				filename  TEXT NOT NULL,
+				edition   TEXT NOT NULL DEFAULT 'unknown',
+				added_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+				UNIQUE(name, edition)
+			)
+		`); err != nil {
+			return err
+		}
+		if _, err := db.Exec(`INSERT INTO books_new (id, name, filename, edition, added_at) SELECT id, name, filename, edition, added_at FROM books`); err != nil {
+			return err
+		}
+		if _, err := db.Exec(`DROP TABLE books`); err != nil {
+			return err
+		}
+		if _, err := db.Exec(`ALTER TABLE books_new RENAME TO books`); err != nil {
+			return err
+		}
+
+		if _, err := db.Exec(`UPDATE schema_version SET version = 4`); err != nil {
+			return err
+		}
+		version = 4
 	}
 
 	return nil
@@ -169,9 +282,9 @@ func migrate(db *sql.DB) error {
 
 // BookExists returns true if a book with the given name is already indexed.
 func (s *Store) BookExists(name string) (bool, error) {
-	var count int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM books WHERE name = ?`, name).Scan(&count)
-	return count > 0, err
+	var exists bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM books WHERE name = ?)`, name).Scan(&exists)
+	return exists, err
 }
 
 // AddBook inserts a book record and returns its ID.
@@ -188,7 +301,7 @@ func (s *Store) AddBook(name, filename, edition string) (int64, error) {
 
 // AddChunks bulk-inserts chunks for a book into the chunks table.
 // The chunks_fts FTS5 table is kept in sync automatically via triggers.
-func (s *Store) AddChunks(bookID int64, bookName, edition string, chunks []Chunk) error {
+func (s *Store) AddChunks(bookID int64, chunks []Chunk) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -196,8 +309,8 @@ func (s *Store) AddChunks(bookID int64, bookName, edition string, chunks []Chunk
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO chunks (book_id, book_name, edition, page, section, content)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO chunks (book_id, page, section, content)
+		VALUES (?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -205,7 +318,7 @@ func (s *Store) AddChunks(bookID int64, bookName, edition string, chunks []Chunk
 	defer stmt.Close()
 
 	for _, c := range chunks {
-		if _, err := stmt.Exec(bookID, bookName, edition, c.Page, c.Section, c.Content); err != nil {
+		if _, err := stmt.Exec(bookID, c.Page, c.Section, c.Content); err != nil {
 			return fmt.Errorf("insert chunk p%d: %w", c.Page, err)
 		}
 	}
@@ -237,22 +350,27 @@ func (s *Store) runSearch(ftsQuery, edition string, limit int) ([]Chunk, error) 
 		err  error
 	)
 
+	// bm25 column weights: content=1.0, section=10.0
+	// This heavily boosts chunks where the search term appears in a section
+	// heading so that definitional chapters outrank passing mentions.
 	if edition != "" {
 		rows, err = s.db.Query(`
-			SELECT c.book_name, c.edition, c.page, c.section, c.content
+			SELECT b.name, b.edition, c.page, c.section, c.content
 			FROM chunks c
 			JOIN chunks_fts f ON c.id = f.rowid
-			WHERE chunks_fts MATCH ? AND c.edition = ?
-			ORDER BY rank
+			JOIN books b ON c.book_id = b.id
+			WHERE chunks_fts MATCH ? AND b.edition = ?
+			ORDER BY bm25(chunks_fts, 1.0, 10.0)
 			LIMIT ?
 		`, ftsQuery, edition, limit)
 	} else {
 		rows, err = s.db.Query(`
-			SELECT c.book_name, c.edition, c.page, c.section, c.content
+			SELECT b.name, b.edition, c.page, c.section, c.content
 			FROM chunks c
 			JOIN chunks_fts f ON c.id = f.rowid
+			JOIN books b ON c.book_id = b.id
 			WHERE chunks_fts MATCH ?
-			ORDER BY rank
+			ORDER BY bm25(chunks_fts, 1.0, 10.0)
 			LIMIT ?
 		`, ftsQuery, limit)
 	}
@@ -292,37 +410,57 @@ func (s *Store) ListBooks() ([]Book, error) {
 	return books, rows.Err()
 }
 
-// RemoveBook deletes a book and all its chunks by name.
+// RemoveBook deletes a book by name. Associated chunks are removed
+// automatically via the ON DELETE CASCADE foreign key constraint, and the
+// chunks_ad trigger keeps the FTS5 index in sync.
 func (s *Store) RemoveBook(name string) (bool, error) {
-	tx, err := s.db.Begin()
+	res, err := s.db.Exec(`DELETE FROM books WHERE name = ?`, name)
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
-
-	// Get book ID first
-	var id int64
-	err = tx.QueryRow(`SELECT id FROM books WHERE name = ?`, name).Scan(&id)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
+	n, err := res.RowsAffected()
 	if err != nil {
 		return false, err
 	}
-
-	// Delete chunks — the chunks_ad trigger removes them from chunks_fts automatically.
-	if _, err := tx.Exec(`DELETE FROM chunks WHERE book_id = ?`, id); err != nil {
-		return false, err
-	}
-	if _, err := tx.Exec(`DELETE FROM books WHERE id = ?`, id); err != nil {
-		return false, err
-	}
-
-	return true, tx.Commit()
+	return n > 0, nil
 }
 
-// sanitizeFTS builds an FTS5 query joining all words with the given operator ("AND" or "OR").
-// All non-alphanumeric characters are replaced with spaces to prevent FTS5 syntax errors.
+// RemoveAllBooks deletes every book and all associated chunks.
+// Returns the number of books removed.
+func (s *Store) RemoveAllBooks() (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM books`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// stopWords are common English words that add noise to FTS5 queries.
+// Removing them lets content words like "changeling" match without
+// requiring filler words ("what", "are") to also appear in the chunk.
+var stopWords = map[string]bool{
+	"a": true, "an": true, "the": true, "and": true, "or": true,
+	"but": true, "is": true, "are": true, "was": true, "were": true,
+	"be": true, "been": true, "being": true, "am": true,
+	"do": true, "does": true, "did": true,
+	"have": true, "has": true, "had": true,
+	"will": true, "would": true, "shall": true, "should": true,
+	"can": true, "could": true, "may": true, "might": true, "must": true,
+	"not": true, "no": true,
+	"i": true, "me": true, "my": true, "we": true, "our": true, "you": true, "your": true,
+	"he": true, "she": true, "it": true, "its": true, "they": true, "them": true, "their": true,
+	"this": true, "that": true, "these": true, "those": true,
+	"what": true, "which": true, "who": true, "whom": true, "how": true, "when": true, "where": true, "why": true,
+	"in": true, "on": true, "at": true, "to": true, "for": true, "of": true,
+	"with": true, "by": true, "from": true, "about": true, "into": true,
+	"if": true, "then": true, "so": true, "as": true, "than": true,
+	"tell": true, "explain": true, "describe": true,
+}
+
+// sanitizeFTS builds an FTS5 query joining all content words with the given
+// operator ("AND" or "OR"). Stop words are removed so that natural-language
+// questions don't dilute the search. All non-alphanumeric characters are
+// replaced with spaces to prevent FTS5 syntax errors.
 func sanitizeFTS(q, op string) string {
 	q = strings.TrimSpace(q)
 	// Replace anything that isn't a letter, digit, or space with a space
@@ -334,7 +472,17 @@ func sanitizeFTS(q, op string) string {
 			sb.WriteByte(' ')
 		}
 	}
-	words := strings.Fields(sb.String())
+	raw := strings.Fields(sb.String())
+	var words []string
+	for _, w := range raw {
+		if !stopWords[strings.ToLower(w)] {
+			words = append(words, w)
+		}
+	}
+	// If all words were stop words, fall back to original words
+	if len(words) == 0 {
+		words = raw
+	}
 	if len(words) == 0 {
 		return `""`
 	}
